@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hello Neighbor WebGL Cutscene</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: sans-serif;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        /* UI untuk tombol animasi */
+        #ui-container {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 8px;
+            color: white;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        h3 {
+            margin-top: 0;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        button {
+            display: block;
+            width: 100%;
+            margin-bottom: 5px;
+            padding: 8px;
+            background: #e84c3d;
+            /* Warna ala Hello Neighbor */
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 4px;
+            text-align: left;
+            font-size: 12px;
+        }
+
+        button:hover {
+            background: #ff6b5b;
+        }
+
+        button.active {
+            background: #2ecc71;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 10px;
+        }
+    </style>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+
+<body>
+    <div id="loading">Memuat Model...</div>
+
+    <div id="ui-container" style="display: none;">
+        <h3>Daftar Animasi</h3>
+        <div id="buttons"></div>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+</body>
+
+</html>
