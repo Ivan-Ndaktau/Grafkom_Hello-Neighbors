@@ -1,4 +1,4 @@
-// --- SETUP BLACKOUT OVERLAY ---
+// SETUP BLACKOUT OVERLAY
 const blackoutDiv = document.createElement('div');
 blackoutDiv.style.position = 'fixed';
 blackoutDiv.style.top = '0';
@@ -26,7 +26,7 @@ import { Sky } from 'three/addons/objects/Sky.js'
 
 const scene = new THREE.Scene()
 
-// --- SETTING RENDERER (Disesuaikan dengan Lighting Golden Hour) ---
+// SETTING RENDERER (Disesuaikan dengan Lighting Golden Hour)
 const renderer = new THREE.WebGLRenderer({ antialias: true })
 renderer.setSize(window.innerWidth, window.innerHeight)
 renderer.shadowMap.enabled = true
@@ -34,7 +34,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap
 renderer.outputColorSpace = THREE.SRGBColorSpace
 // Tone mapping Exposure diturunkan sedikit agar matahari sore terlihat dramatis
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.5;
+renderer.toneMappingExposure = 1.2;
 document.body.appendChild(renderer.domElement)
 
 // setup kamera awal
@@ -49,10 +49,6 @@ controls.dampingFactor = 0.05
 controls.target.set(-80.31, -1.60, -11.59)
 controls.update()
 
-// ==========================================
-// --- BAGIAN LIGHTING & ATMOSFER BARU ---
-// ==========================================
-
 // 1. SKYBOX (Procedural Sky)
 const sky = new Sky();
 sky.scale.setScalar(4500); // Ukuran raksasa
@@ -66,8 +62,8 @@ skyUniforms['mieDirectionalG'].value = 0.7;
 
 const sun = new THREE.Vector3();
 // Konfigurasi posisi matahari (Sore hari)
-const elevation = 2;   // 0 sampai 90 (2 = sangat rendah/mau terbenam)
-const azimuth = 320;   // Rotasi keliling (180 = depan/samping)
+const elevation = 2;
+const azimuth = 320;
 
 const phi = THREE.MathUtils.degToRad(90 - elevation);
 const theta = THREE.MathUtils.degToRad(azimuth);
@@ -79,11 +75,11 @@ skyUniforms['sunPosition'].value.copy(sun);
 const fogColor = new THREE.Color(0xcc8855);
 scene.fog = new THREE.FogExp2(fogColor, 0.008);
 
-// 3. HEMISPHERE LIGHT (Pengganti Ambient Light)
-const hemiLight = new THREE.HemisphereLight(0xffeeb1, 0x080820, 2);
-scene.add(hemiLight);
+// 3. Ambient Light
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+scene.add(ambientLight);
 
-// 4. DIRECTIONAL LIGHT (Matahari Utama)
+// 4. DIRECTIONAL LIGHT
 const dirLight = new THREE.DirectionalLight(0xffaa33, 6) // Warna Emas/Oranye
 dirLight.position.set(-60, 20, 80);
 dirLight.castShadow = true
@@ -103,9 +99,23 @@ dirLight.shadow.camera.top = 100;
 dirLight.shadow.camera.bottom = -100;
 scene.add(dirLight)
 
-// ==========================================
-// --- LOGIC GAME & ANIMASI ---
-// ==========================================
+// VARIABEL LAMPU (Global untuk diakses)
+
+let spotLight1 = null;
+let spotLight2 = null;
+let lampReflectiveFloors = [];
+
+const pmremGenerator = new THREE.PMREMGenerator(renderer)
+pmremGenerator.compileEquirectangularShader()
+
+function updateSkyEnvironment() {
+    const skyRT = pmremGenerator.fromScene(sky)
+    scene.environment = skyRT.texture
+}
+
+updateSkyEnvironment()
+
+// LOGIC GAME & ANIMASI
 
 const clock = new THREE.Clock()
 let mixer
@@ -122,6 +132,22 @@ let scene11StartTime = 0;
 let scene12StartTime = 0;
 let scene13StartTime = 0;
 
+// COLLISION SYSTEM VARIABLES
+const raycaster = new THREE.Raycaster();
+const collidableObjects = []; // Array untuk menyimpan objek tembok/lantai
+const collisionDistance = 0.5; // Jarak minimal kamera ke tembok
+
+// Variabel Kontrol Kamera
+const camSettings = {
+    fov: 45,
+    roll: 0.0,
+    pitch: 0.0,
+    yaw: 0.0,
+    droneMode: true,
+    speed: 15.0,
+    lookSpeed: 0.002
+};
+
 // loaders
 const dracoLoader = new DRACOLoader()
 dracoLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/')
@@ -133,75 +159,350 @@ let ballModel = null
 let playerModel = null
 let playerAnimations = [];
 
-// --- Helper Functions ---
+// Helper Functions
 
 function fixMaterials(model) {
     model.traverse((child) => {
         if (child.isMesh) {
+            // 1. Aktifkan Bayangan pada Mesh
+            child.castShadow = true;
+            child.receiveShadow = true;
+
+            // 2. Terapkan fixMaterialProperties ke materialnya
             if (child.material) {
                 if (Array.isArray(child.material)) {
+                    // Jika materialnya banyak (array)
                     child.material.forEach(mat => fixMaterialProperties(mat));
                 } else {
+                    // Jika materialnya satu
                     fixMaterialProperties(child.material);
                 }
-                child.castShadow = true;
-                child.receiveShadow = true;
             }
         }
     });
 }
 
-function fixMaterialProperties(material) {
-    material.transparent = false;
-    material.opacity = 1.0;
-    material.alphaTest = 0.5;
-    material.side = THREE.FrontSide;
-    material.needsUpdate = true;
-    material.depthTest = true;
-    material.depthWrite = true;
-    if (material.map) {
-        material.map.encoding = THREE.sRGBEncoding;
-        material.map.needsUpdate = true;
-    }
+function makeCharacterGlossy(model) {
+    model.traverse(child => {
+        if (!child.isMesh || !child.material) return;
+
+        // Pastikan PBR
+        if (!(child.material instanceof THREE.MeshStandardMaterial)) {
+            const oldMap = child.material.map || null;
+            child.material = new THREE.MeshStandardMaterial({
+                map: oldMap
+            });
+        }
+
+        child.material.metalness = 1.0;
+        child.material.roughness = 2;
+        child.material.clearcoat = 1.5;
+        child.material.clearcoatRoughness = 0.06;
+        child.material.envMapIntensity = 2.9;
+
+        // Warna tekstur aman
+        if (child.material.map) {
+            child.material.map.colorSpace = THREE.SRGBColorSpace;
+        }
+
+        child.castShadow = true;
+        child.receiveShadow = true;
+        child.material.needsUpdate = true;
+    });
 }
 
-// --- LOADERS ---
 
-// 1. LOAD LAMPU (Kode Baru disisipkan di sini)
-gltfLoader.load('./lamp.glb', function (gltf) {
-    const lampModel = gltf.scene;
+function fixMaterialProperties(material) {
 
-    // Skala
-    const scaleFactor = 0.01;
-    lampModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
-    lampModel.updateMatrixWorld(true);
+    if (!(material instanceof THREE.MeshStandardMaterial)) {
+        material = new THREE.MeshStandardMaterial({
+            map: material.map || null // diffuse
+        })
+    }
+    // SPECULAR / REFLECTION SETTING
 
-    // Bounding Box
-    const box = new THREE.Box3().setFromObject(lampModel);
+    material.metalness = material.metalness ?? 0.2
+    material.roughness = material.roughness ?? 0.4
+    material.clearcoat = 0.4
+    material.clearcoatRoughness = 0.25
+    material.envMapIntensity = 1.1
 
-    // Posisi Target
-    const targetX = 2;
-    const targetY = 0.57; // Tinggi tanah/jalan
-    const targetZ = -20.00;
+    material.transparent = false
+    material.opacity = 1
+    material.side = THREE.FrontSide
+    material.depthTest = true
+    material.depthWrite = true
 
-    lampModel.position.set(targetX, 0, targetZ);
+    if (material.map) {
+        material.map.colorSpace = THREE.SRGBColorSpace
+        material.map.needsUpdate = true
+    }
 
-    // Auto-grounding (Y adjustment)
-    const bottomOffset = box.min.y;
-    lampModel.position.y = targetY - bottomOffset;
+    material.needsUpdate = true
+    return material
+}
 
-    // Material & Add to Scene
-    fixMaterials(lampModel);
-    scene.add(lampModel);
 
-    // Cahaya Biru Lampu
-    const lightHeight = (box.max.y - box.min.y) * 0.9;
-    const blueLight = new THREE.PointLight(0x0088ff, 300, 25);
-    blueLight.position.set(targetX, lampModel.position.y + lightHeight, targetZ);
-    blueLight.castShadow = true;
-    blueLight.shadow.bias = -0.0001;
-    scene.add(blueLight);
+
+// FUNGSI UNTUK MEMBUAT AREA SPECULAR DI BAWAH LAMPU
+function createReflectiveFloorUnderLamp(lampPosition, lampIndex) {
+    // Buat lingkaran reflektif di bawah lampu untuk specular highlight
+    const geometry = new THREE.CircleGeometry(1.2, 32);
+
+    // Material dengan specular tinggi
+    const material = new THREE.MeshStandardMaterial({
+        color: 0x775533,
+        roughness: 0.15,
+        metalness: 0.25,
+        side: THREE.DoubleSide
+    });
+
+    const reflectiveCircle = new THREE.Mesh(geometry, material);
+    reflectiveCircle.position.set(lampPosition.x, 0.01, lampPosition.z);
+    reflectiveCircle.rotation.x = -Math.PI / 2; // Horizontal
+
+    reflectiveCircle.receiveShadow = true;
+    reflectiveCircle.userData.isReflectiveFloor = true;
+    reflectiveCircle.userData.lampIndex = lampIndex;
+
+    scene.add(reflectiveCircle);
+    lampReflectiveFloors.push(reflectiveCircle);
+
+    return reflectiveCircle;
+}
+
+// LOADERS
+
+gltfLoader.load('./door.glb', function (gltf) {
+    // PINTU 1
+    const door1 = gltf.scene;
+    door1.scale.set(1.6, 1.3, 1.3); // Sesuaikan scale jika perlu
+    door1.position.set(-4.55, 0.5, -13.9);
+
+    door1.rotation.y = 0;
+
+    fixMaterials(door1);
+
+    door1.traverse((child) => {
+        if (child.isMesh) collidableObjects.push(child); // Tambah collision
+    });
+    scene.add(door1);
+
+    //
+    const door2 = door1.clone();
+    door2.position.set(0.55, 0.5, -22.91);
+
+    // Fix shadow untuk clone
+    door2.traverse((child) => {
+        if (child.isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+        }
+    });
+    door2.traverse((child) => {
+        if (child.isMesh) collidableObjects.push(child); // Tambah collision
+    });
+    scene.add(door2);
 });
+
+// 2. LOAD WALL LAMP (lamp2.glb) - DENGAN SPOTLIGHT KUAT & HELPER
+gltfLoader.load('./lamp2.glb', function (gltf) {
+    // LAMPU 1 (KIRI)
+    const lamp1 = gltf.scene;
+    lamp1.scale.set(1.0, 1.0, 1.0);
+    lamp1.position.set(-0.04, 3.17, -22.8);
+    lamp1.rotation.y = 0;
+    fixMaterials(lamp1);
+    scene.add(lamp1);
+
+    spotLight1 = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), new THREE.MeshBasicMaterial({ color: 0xff0000 })); // Dummy placeholder jika perlu, tapi pakai SpotLight asli di bawah:
+
+    spotLight1 = new THREE.SpotLight(0xffaa33, 150);
+    spotLight1.position.set(-0.04, 3.17 + 0.2, -22.8 + 0.5);
+    spotLight1.angle = Math.PI / 3;
+    spotLight1.penumbra = 0.5;
+    spotLight1.decay = 1.0;
+    spotLight1.distance = 30;
+    spotLight1.castShadow = true;
+
+    spotLight1.shadow.mapSize.width = 2048; // Resolusi bayangan dipertinggi
+    spotLight1.shadow.mapSize.height = 2048;
+    spotLight1.shadow.bias = -0.0001; // Mengurangi shadow acne (garis-garis)
+    spotLight1.shadow.normalBias = 0.02;
+
+    // Target diarahkan lurus ke bawah (lantai)
+    spotLight1.target.position.set(-0.04, 0, -22.8 + 0.5);
+
+    scene.add(spotLight1);
+    scene.add(spotLight1.target);
+
+    // Buat area specular di bawah lampu 1
+    createReflectiveFloorUnderLamp(
+        new THREE.Vector3(-0.04, 0, -22.8),
+        1
+    );
+
+    // LAMPU 2 (KANAN)
+    const lamp2 = lamp1.clone();
+    lamp2.position.set(2.4, 3.5, -22.8);
+
+    lamp2.traverse((child) => {
+        if (child.isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+
+            if (child.material) {
+
+                if (
+                    child.name.toLowerCase().includes('glass') ||
+                    child.name.toLowerCase().includes('bulb') ||
+                    child.name.toLowerCase().includes('lamp')
+                ) {
+                    child.userData.isLampGlow = true;
+
+                    child.material.emissive = new THREE.Color(0xffaa33);
+                    child.material.emissiveIntensity = 0.6;
+
+                    child.material.roughness = 0.08;
+                    child.material.metalness = 0.35;
+                    child.material.clearcoat = 1.0;
+                    child.material.clearcoatRoughness = 0.05;
+                    child.material.envMapIntensity = 1.5;
+                }
+            }
+        }
+    });
+
+    scene.add(lamp2);
+
+    spotLight2 = new THREE.SpotLight(0xffaa33, 150);
+    spotLight2.position.set(2.4, 3.5 + 0.2, -22.8 + 0.5);
+    spotLight2.angle = Math.PI / 3;
+    spotLight2.penumbra = 0.5;
+    spotLight2.decay = 1.0;
+    spotLight2.distance = 30;
+    spotLight2.castShadow = true;
+
+    spotLight2.shadow.mapSize.width = 2048;
+    spotLight2.shadow.mapSize.height = 2048;
+    spotLight2.shadow.bias = -0.0001;
+    spotLight2.shadow.normalBias = 0.02;
+
+    // Target diarahkan lurus ke bawah
+    const target2 = new THREE.Object3D();
+    target2.position.set(2.4, 0, -22.8 + 0.5);
+    spotLight2.target = target2;
+
+    scene.add(spotLight2);
+    scene.add(target2);
+
+    // Buat area specular di bawah lampu 2
+    createReflectiveFloorUnderLamp(
+        new THREE.Vector3(2.4, 0, -22.8),
+        2
+    );
+
+    // Tambah objek reflektif kecil di bawah lampu untuk specular highlight
+    addReflectiveObjects();
+});
+
+// WINDOW LOADER
+gltfLoader.load('./glass3.glb', function (gltf) {
+    const rawModel = gltf.scene;
+
+    // FUNGSI SETUP MATERIAL OTOMATIS
+    // Memisahkan mana Frame (Solid) dan mana Kaca (Transparan)
+    function setupWindowMaterial(model) {
+        model.traverse((child) => {
+            if (child.isMesh) {
+                collidableObjects.push(child);
+
+                if (child.material) {
+                    const matName = child.material.name.toLowerCase();
+                    const currentOpacity = child.material.opacity;
+
+                    // Cek Logika
+                    const isGlass = matName.includes('glass') ||
+                        matName.includes('window') ||
+                        matName.includes('kaca') ||
+                        currentOpacity < 0.99;
+
+                    if (isGlass) {
+
+
+                        child.material = new THREE.MeshPhysicalMaterial({
+                            color: 0xffffff,
+                            metalness: 0,
+                            roughness: 0,
+                            transmission: 1.0,
+                            thickness: 0.5,
+                            ior: 1.5,
+                            envMapIntensity: 2.0,
+                            opacity: 1.0,
+                            transparent: true,
+                            side: THREE.DoubleSide
+                        });
+
+                        child.castShadow = false;
+                        child.receiveShadow = true;
+
+                    } else {
+                        // MATERIAL FRAME (Putihkan Frame)
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                        fixMaterialProperties(child.material);
+                        child.material.color.setHex(0xffffff);
+                        child.material.roughness = 0.5;
+                    }
+                }
+            }
+        });
+    }
+
+    // JENDELA 1 
+    const window1 = rawModel;
+    setupWindowMaterial(window1); // Jalankan deteksi material
+
+    window1.scale.set(2.5, 1.2, 1.5);
+    window1.position.set(-7.95, 1.2, -28.3);
+    window1.rotation.y = Math.PI / 2;
+    scene.add(window1);
+
+});
+
+// Fungsi untuk menambah objek reflektif di area lampu
+function addReflectiveObjects() {
+    // Objek reflektif di bawah lampu 1
+    const reflectiveObject1 = createReflectiveObject(
+        new THREE.Vector3(-0.04, 0.3, -22.3),
+        0x886644
+    );
+
+    // Objek reflektif di bawah lampu 2
+    const reflectiveObject2 = createReflectiveObject(
+        new THREE.Vector3(2.4, 0.3, -22.3),
+        0x886644
+    );
+}
+
+function createReflectiveObject(position, color) {
+    // Buat objek kecil reflektif (misalnya bingkai foto atau vas kecil)
+    const geometry = new THREE.BoxGeometry(0.3, 0.1, 0.3);
+    const material = new THREE.MeshStandardMaterial({
+        color: color,
+        roughness: 0.15,    // Sangat rendah untuk specular kuat
+        metalness: 0.35,    // Sedikit metalik
+        envMapIntensity: 1.0
+    });
+
+    const object = new THREE.Mesh(geometry, material);
+    object.position.copy(position);
+    object.castShadow = true;
+    object.receiveShadow = true;
+
+    scene.add(object);
+    return object;
+}
 
 // 2. Load Bola
 const ballRadius = 2.5
@@ -212,7 +513,37 @@ gltfLoader.load('./beach_ball.glb', function (gltf) {
     const fixedY = 0.2;
     ballModel.position.set(startBallPos.x, fixedY, startBallPos.z);
 
-    fixMaterials(ballModel); // Pakai fixMaterials biar konsisten
+    // SETUP KHUSUS AGAR BOLA MENGKILAP (SPECULAR)
+    ballModel.traverse((child) => {
+        if (child.isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+
+            collidableObjects.push(child);
+
+            if (child.material) {
+                // Pastikan material standar
+                if (!(child.material instanceof THREE.MeshStandardMaterial)) {
+                    child.material = new THREE.MeshStandardMaterial({
+                        map: child.material.map || null, // diffuse texture
+                        color: child.material.color || 0xffffff // diffuse color
+                    });
+                }
+
+                child.material.roughness = 0.2;
+                child.material.metalness = 0;
+
+                child.material.clearcoat = 1.0;
+                child.material.clearcoatRoughness = 0.1;
+
+                // Agar pantulan lingkungan (langit) terlihat jelas
+                child.material.envMapIntensity = 0.6;
+
+                child.material.needsUpdate = true;
+            }
+        }
+    });
+
     scene.add(ballModel);
 });
 
@@ -223,6 +554,32 @@ gltfLoader.load('./env2_optimized.glb', function (gltf) {
         if (child.isMesh) {
             child.castShadow = true;
             child.receiveShadow = true;
+
+            collidableObjects.push(child);
+
+            // Optimasi material untuk area dalam rumah (di sekitar lampu)
+            if (child.material &&
+                (child.position.z < -10 && child.position.z > -25) &&
+                (child.position.x > -5 && child.position.x < 5)) {
+
+                // Untuk lantai di dalam rumah, buat lebih reflektif
+                if (child.position.y < 0.5) {
+                    if (child.material.roughness !== undefined) {
+                        child.material.roughness = 0.3; // Lebih reflektif
+                    }
+                    if (child.material.metalness !== undefined) {
+                        child.material.metalness = 0.15;
+                    }
+                }
+
+                // Untuk dinding di dalam rumah
+                if (child.position.y > 1.0) {
+                    if (child.material.roughness !== undefined) {
+                        child.material.roughness = 0.4;
+                    }
+                }
+            }
+
             if (child.name.toLowerCase().includes('cube') && child.scale.x < 0.1) {
                 child.visible = false;
             }
@@ -238,6 +595,12 @@ gltfLoader.load('./player_kid.glb', function (gltf) {
     playerModel.scale.set(0.6, 0.6, 0.6);
     playerModel.position.set(-95, 0, 0);
     playerModel.rotation.y = 1.570796;
+
+    playerModel.traverse((child) => {
+        if (child.isMesh) {
+            collidableObjects.push(child);
+        }
+    });
 
     fixMaterials(playerModel);
 
@@ -332,7 +695,7 @@ let neighborMixer = null
 let neighborAnimations = []
 let neighborHasFallen = false
 
-// --- LOADER NEIGHBOR (Sisipkan di bagian Loaders) ---
+// LOADER NEIGHBOR (Sisipkan di bagian Loaders)
 gltfLoader.load('./neighbor.glb', function (gltf) {
     neighborModel = gltf.scene;
     neighborAnimations = gltf.animations;
@@ -344,7 +707,7 @@ gltfLoader.load('./neighbor.glb', function (gltf) {
     neighborModel.rotation.y = Math.PI / 2;
 
     neighborModel.visible = false;
-    fixMaterials(neighborModel);
+    makeCharacterGlossy(neighborModel);
     scene.add(neighborModel);
 
     neighborMixer = new THREE.AnimationMixer(neighborModel);
@@ -360,7 +723,7 @@ gltfLoader.load('./neighbor_disbelief.glb', function (gltf) {
     disbeliefModel.scale.set(0.45, 0.45, 0.45);
 
     // Posisi
-    disbeliefModel.position.set(1.14, 0, -22.67);
+    disbeliefModel.position.set(1.14, 0, -21.67);
     disbeliefModel.lookAt(1.13, 1.38, -21.80);
 
     // Posisi awal disembunyikan
@@ -378,7 +741,7 @@ gltfLoader.load('./neighbor_disbelief.glb', function (gltf) {
 });
 
 // HELPER FUNCTION
-// --- UPDATE HELPER FUNCTION ---
+// UPDATE HELPER FUNCTION
 function switchNeighborAnimation(animName) {
     if (!neighborMixer || !neighborAnimations.length) return;
 
@@ -419,7 +782,7 @@ function switchNeighborAnimation(animName) {
     }
 }
 
-// --- LOGIC VARIABLES & PHYSICS ---
+// LOGIC VARIABLES & PHYSICS
 const ballPhysics = {
     velocity: 0,
     velocityY: 0,
@@ -445,45 +808,131 @@ const cineParams = {
     speedZ: 0
 }
 
-// --- GUI SETUP ---
-const gui = new GUI({ title: "Production Panel" })
-// (Folder Atmosfer opsional, untuk debug lighting jika perlu)
-const atmosFolder = gui.addFolder('Atmosphere');
-const sunParams = { elevation: 2, azimuth: 320 };
-function updateSun() {
-    const phi = THREE.MathUtils.degToRad(90 - sunParams.elevation);
-    const theta = THREE.MathUtils.degToRad(sunParams.azimuth);
-    const sunPos = new THREE.Vector3().setFromSphericalCoords(1, phi, theta);
-    sky.material.uniforms['sunPosition'].value.copy(sunPos);
-}
-atmosFolder.add(sunParams, 'elevation', 0, 90).onChange(updateSun);
-atmosFolder.add(sunParams, 'azimuth', 0, 360).onChange(updateSun);
+// SETUP GUI & CONTROLS
 
-const manualObj = {
-    enableManual: false,
-    saveLog: () => {
-        const logText = `
-// Scene Data Copied:
-pos: new THREE.Vector3(${camera.position.x.toFixed(2)}, ${camera.position.y.toFixed(2)}, ${camera.position.z.toFixed(2)}),
-tgt: new THREE.Vector3(${controls.target.x.toFixed(2)}, ${controls.target.y.toFixed(2)}, ${controls.target.z.toFixed(2)}),
-roll: new THREE.Vector3(${camera.up.x.toFixed(2)}, ${camera.up.y.toFixed(2)}, ${camera.up.z.toFixed(2)}),
-        `;
-        console.log(logText);
-        alert("Koordinat dicetak di Console (F12) & Clipboard!");
-        navigator.clipboard.writeText(logText);
-    }
-};
+const gui = new GUI({ title: "CONTROL PANEL" });
 
-const manualFolder = gui.addFolder('Mode Manual / Camera Tool');
-manualFolder.add(manualObj, 'enableManual').name('Enable Free Cam').onChange(v => {
-    isManualMode = v;
-    if (v) {
-        cineParams.active = false;
-        isMoviePlaying = false;
-        controls.enabled = true;
+// 1. FOLDER KAMERA & TILT
+const camFolder = gui.addFolder('Camera Adjustment');
+
+// FOV
+camFolder.add(camSettings, 'fov', 10, 120).name('Zoom (FOV)').listen().onChange(v => {
+    camera.fov = v;
+    camera.updateProjectionMatrix();
+});
+
+// ROLL (Miring Kiri/Kanan)
+camFolder.add(camSettings, 'roll', -0.5, 0.5).name('Roll (Tilt)').listen().onChange(v => {
+    if (isManualMode) camera.rotation.z = v;
+});
+
+// PITCH (Ndongak/Nunduk) - Manual Control via GUI
+camFolder.add(camSettings, 'pitch', -1.5, 1.5).name('Pitch (Up/Down)').listen().onChange(v => {
+    if (isManualMode) camera.rotation.x = v;
+});
+
+// YAW (Tengok Kiri/Kanan) - Manual Control via GUI
+camFolder.add(camSettings, 'yaw', -3.14, 3.14).name('Yaw (Left/Right)').listen().onChange(v => {
+    if (isManualMode) camera.rotation.y = v;
+});
+
+// 2. FOLDER NAVIGASI
+const navFolder = gui.addFolder('Navigation Mode');
+navFolder.add(camSettings, 'droneMode').name('Active Drone/FPS').listen().onChange(isActive => {
+    isManualMode = isActive;
+    controls.enabled = !isActive; // Jika Drone aktif, Orbit mati
+
+    if (isActive) {
+        controls.reset();
+    } else {
+        document.exitPointerLock();
+        camera.rotation.z = 0; // Reset roll
+        camera.rotation.x = 0; // Reset pitch agar tidak miring aneh saat kembali ke orbit
     }
 });
-manualFolder.add(manualObj, 'saveLog').name('PRINT COORDINATES');
+navFolder.add(camSettings, 'speed', 5, 50).name('Fly Speed');
+
+const envRotateSettings = {
+    active: false,
+    speed: 5,
+    zoomOut: true
+};
+
+const envFolder = gui.addFolder('ENVIRONMENT SHOWCASE');
+
+envFolder.add(envRotateSettings, 'active').name('Start Orbit Environment').onChange(isActive => {
+    if (isActive) {
+        // SAAT DIAKTIFKAN 
+
+        // 1. Matikan Drone Mode
+        isManualMode = false;
+        camSettings.droneMode = false;
+        controls.enabled = true;
+        document.exitPointerLock();
+
+        // 2. Reset Orientasi
+        camera.up.set(0, 1, 0);
+        camera.rotation.z = 0;
+        controls.target.set(0, 0, 0);
+
+        // 3. SET POSISI TINGGI (High Angle)
+        if (envRotateSettings.zoomOut) {
+
+            camera.position.set(0, 100, 100);
+        }
+
+        // 4. Update agar posisi tersimpan di controls
+        controls.update();
+
+        // 5. KUNCI SUDUT VERTIKAL (PENTING) 
+        // Kita ambil sudut pandang saat ini, lalu kunci MIN dan MAX-nya sama.
+        // Akibatnya: Kamera TIDAK BISA naik/turun, hanya bisa muter horisontal.
+        const currentPolar = controls.getPolarAngle();
+        controls.minPolarAngle = currentPolar;
+        controls.maxPolarAngle = currentPolar;
+
+        // 6. Nyalakan Putaran
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = envRotateSettings.speed;
+
+    } else {
+        // SAAT DIMATIKAN
+        controls.autoRotate = false;
+
+        // 7. LEPAS KUNCIAN (Bebaskan lagi)
+        controls.minPolarAngle = 0;
+        controls.maxPolarAngle = Math.PI;
+
+        controls.update();
+    }
+});
+
+envFolder.add(envRotateSettings, 'speed', 0.1, 10).name('Speed').onChange(v => {
+    controls.autoRotateSpeed = v;
+});
+
+// 3. TOMBOL PLAY SCENE (MAIN FEATURE)
+const playFolder = gui.addFolder('ACTION');
+const playBtn = {
+    start: () => {
+        // 1. Matikan mode manual
+        isManualMode = false;
+        camSettings.droneMode = false;
+        controls.enabled = false;
+        document.exitPointerLock();
+
+        // 2. Sembunyikan GUI
+        gui.hide();
+
+        // 3. Mulai Sequence
+        director.playSequence();
+    }
+};
+playFolder.add(playBtn, 'start').name('PLAY SCENE');
+
+// Default Start State
+isManualMode = true; // User mulai di mode Drone
+controls.enabled = false;
 
 // Helper Function: Switch Player Animation
 function switchPlayerAnimation(animType) {
@@ -541,6 +990,20 @@ function switchPlayerAnimation(animType) {
     }
 }
 
+function checkCollision(position, direction, distance) {
+    // Set posisi raycaster dari kamera
+    raycaster.set(position, direction);
+
+    // Cek tabrakan dengan objek di array collidableObjects
+    const intersects = raycaster.intersectObjects(collidableObjects, true);
+
+    // Jika ada objek yang lebih dekat dari jarak toleransi, return true (nabrak)
+    if (intersects.length > 0 && intersects[0].distance < distance) {
+        return true;
+    }
+    return false;
+}
+
 // list scenenya (DATA KAMERA MAIN TETAP DIPERTAHANKAN)
 const sceneList = {
     scene1: {
@@ -580,7 +1043,7 @@ const sceneList = {
     },
     scene8: {
         pos: new THREE.Vector3(-5.24, 1.95, -3.29),
-        tgt: new THREE.Vector3(-6.58, 1.13, -0.59),
+        tgt: new THREE.Vector3(-6.5, 1.0, 0),
         roll: new THREE.Vector3(0.00, 1.00, 0.00),
     },
     scene9: {
@@ -778,17 +1241,17 @@ function cutTo(sceneKey) {
         if (playerModel) playerModel.visible = false;
         if (stallModel) stallModel.visible = false;
 
-        // --- SETUP NEIGHBOR DISBELIEF ---
+        // SETUP NEIGHBOR DISBELIEF
         if (disbeliefModel) {
             disbeliefModel.visible = true;
-            disbeliefModel.position.set(1.14, 0, -22.67);
+            disbeliefModel.position.set(1.14, 0, -21.67);
             // ROTASI 180 DERAJAT
             disbeliefModel.rotation.set(0, 0, 0);
         }
 
         if (neighborModel) {
             neighborModel.visible = false;
-            neighborModel.position.set(1.14, 0, -22.67);
+            neighborModel.position.set(1.14, 0, -21.67);
             neighborModel.rotation.set(0, Math.PI, 0);
 
             // Inisialisasi timer di userData
@@ -873,7 +1336,8 @@ const director = {
         }
     },
     playSequence: () => {
-        manualObj.enableManual = false;
+        camSettings.droneMode = false;
+        if (typeof droneToggle !== 'undefined') droneToggle.updateDisplay();
         isManualMode = false;
         isMoviePlaying = true;
 
@@ -951,7 +1415,7 @@ const director = {
                                                                 }, 500);
                                                                 setTimeout(() => {
                                                                     triggerBlackout(true);
-                                                                }, 13500);
+                                                                }, 12200);
 
                                                             }, 1000); // Durasi Blackout Transisi
 
@@ -971,19 +1435,186 @@ const director = {
     }
 };
 
-const dirFolder = gui.addFolder('Director Mode');
-dirFolder.add(director, 'currentScene', Object.keys(sceneList)).name('Jump to Scene').onChange(val => cutTo(val));
-dirFolder.add(director, 'playSequence').name('ACTION (Play Movie)');
-dirFolder.add(director, 'togglePause').name('⏯ PAUSE / RESUME');
+// WASD CONTROL VARIABLES
+const keys = {
+    w: false,
+    a: false,
+    s: false,
+    d: false,
+    space: false, // Naik
+    ctrl: false,  // Turun
+    shift: false
+};
+
+window.addEventListener('keydown', (e) => {
+    if (!isManualMode) return;
+    switch (e.code) {
+        case 'KeyW': keys.w = true; break;
+        case 'KeyA': keys.a = true; break;
+        case 'KeyS': keys.s = true; break;
+        case 'KeyD': keys.d = true; break;
+        case 'Space': keys.space = true; break;      // SPASI (Naik)
+        case 'ControlLeft': keys.ctrl = true; break; // CTRL KIRI (Turun)
+        case 'ShiftLeft': keys.shift = true; break;
+        case 'shift': keys.shift = true; break;
+    }
+});
+
+window.addEventListener('keyup', (e) => {
+    if (!isManualMode) return;
+    switch (e.code) {
+        case 'KeyW': keys.w = false; break;
+        case 'KeyA': keys.a = false; break;
+        case 'KeyS': keys.s = false; break;
+        case 'KeyD': keys.d = false; break;
+        case 'Space': keys.space = false; break;
+        case 'ControlLeft': keys.ctrl = false; break;
+        case 'ShiftLeft': keys.shift = false; break;
+    }
+});
+
+// SCROLL UNTUK ZOOM (FOV)
+window.addEventListener('wheel', (event) => {
+    // Hanya aktif jika mode Drone/Manual
+    if (isManualMode) {
+        // Scroll ke bawah = Zoom Out (FOV nambah), ke atas = Zoom In
+        const delta = event.deltaY > 0 ? 1 : -1;
+        camSettings.fov += delta * 2; // Kecepatan zoom
+
+        // Batasi FOV
+        camSettings.fov = THREE.MathUtils.clamp(camSettings.fov, 10, 120);
+
+        // Update Kamera & GUI
+        camera.fov = camSettings.fov;
+        camera.updateProjectionMatrix();
+    }
+});
+
+// MOUSE LOOK LOGIC (POINTER LOCK)
+// 1. Klik layar untuk kunci mouse saat mode drone
+document.addEventListener('dblclick', () => {
+    if (isManualMode) {
+        document.body.requestPointerLock();
+    }
+});
+
+// 2. Gerakkan kamera saat mouse bergerak (hanya jika terkunci)
+document.addEventListener('mousemove', (event) => {
+    if (isManualMode && document.pointerLockElement === document.body) {
+        // Gunakan camSettings (bukan camConfig)
+        camera.rotation.y -= event.movementX * camSettings.lookSpeed;
+        camera.rotation.x -= event.movementY * camSettings.lookSpeed;
+
+        // Clamp Pitch (Supaya tidak salto)
+        const PI_2 = Math.PI / 2;
+        camera.rotation.x = Math.max(-PI_2, Math.min(PI_2, camera.rotation.x));
+
+        // Update nilai GUI agar sinkron
+        camSettings.pitch = camera.rotation.x;
+        camSettings.yaw = camera.rotation.y;
+
+        camera.rotation.order = "YXZ";
+    }
+});
 
 // animation loop
 function animate() {
+
     requestAnimationFrame(animate)
     const delta = clock.getDelta()
     const now = clock.getElapsedTime()
 
+    // LAMP SHIMMER SYSTEM
+
+    const lampGlowMeshes = [];
+
+    scene.traverse(obj => {
+        if (obj.userData && obj.userData.isLampGlow) {
+            lampGlowMeshes.push(obj);
+        }
+    });
+
+
+    // LAMP SHIMMER ANIMATION
+
+    lampGlowMeshes.forEach(mesh => {
+        if (!mesh.material) return;
+
+        const t = clock.getElapsedTime();
+
+        // Denyut cahaya halus
+        mesh.material.emissiveIntensity =
+            0.6 + Math.sin(t * 3.5 + mesh.id) * 0.15;
+
+        // Kilau specular mikro (seperti kaca)
+        mesh.material.clearcoatRoughness =
+            0.04 + Math.sin(t * 6.0 + mesh.id) * 0.01;
+
+        // Pantulan lingkungan ikut "hidup"
+        mesh.material.envMapIntensity =
+            1.4 + Math.sin(t * 2.0) * 0.2;
+
+        mesh.material.needsUpdate = true;
+    });
+
+    // LOGIKA DRONE / FPS DENGAN COLLISION
     if (isManualMode) {
-        controls.update();
+        // 1. Update Rotasi (Pitch, Yaw, Roll)
+        // Yaw & Pitch dihandle oleh event listener mousemove (lihat poin 6 di bawah), Roll via GUI
+        camera.rotation.z = camSettings.roll;
+
+        // 2. Hitung Kecepatan Frame Ini
+        const actualSpeed = (keys.shift ? camSettings.speed * 2.5 : camSettings.speed) * delta;
+
+        // 3. Tentukan Arah Gerak
+        const forwardDir = new THREE.Vector3();
+        camera.getWorldDirection(forwardDir);
+        forwardDir.y = 0; // Agar W/S gerak datar, tidak terbang ke arah pandangan
+        forwardDir.normalize();
+
+        const rightDir = new THREE.Vector3();
+        rightDir.crossVectors(camera.up, forwardDir).normalize();
+
+        // PROSES GERAKAN DENGAN COLLISION CHECK
+        const nextPos = camera.position.clone();
+
+        // A. Gerak Maju/Mundur (W/S)
+        if (keys.w || keys.s) {
+            const dir = keys.w ? forwardDir : forwardDir.clone().negate();
+            // Cek tabrakan sebelum gerak
+            if (!checkCollision(camera.position, dir, collisionDistance)) {
+                camera.position.addScaledVector(dir, actualSpeed);
+            }
+        }
+
+        // B. Gerak Kiri/Kanan (A/D)
+        if (keys.a || keys.d) {
+            const dir = keys.d ? rightDir.clone().negate() : rightDir;
+            // Cek collision
+            if (!checkCollision(camera.position, dir, collisionDistance)) {
+                camera.position.addScaledVector(dir, actualSpeed);
+            }
+        }
+
+        // C. Gerak Vertikal (Spasi/Ctrl) - Naik Turun
+        // Kita raycast ke atas dan bawah
+        if (keys.space) {
+            const upDir = new THREE.Vector3(0, 1, 0);
+            if (!checkCollision(camera.position, upDir, collisionDistance)) {
+                camera.position.y += actualSpeed;
+            }
+        }
+        if (keys.ctrl) {
+            const downDir = new THREE.Vector3(0, -1, 0);
+            // Cek lantai
+            if (!checkCollision(camera.position, downDir, 1.0)) { // Toleransi lantai lebih kecil
+                camera.position.y -= actualSpeed;
+            }
+        }
+
+        // Hard Limit lantai (Safety net)
+        if (camera.position.y < 1.0) camera.position.y = 1.0;
+
         renderer.render(scene, camera);
         return;
     }
@@ -1006,7 +1637,11 @@ function animate() {
             lookMixer.update(delta);
         }
 
-        // --- GERAKAN PLAYER UTAMA ---
+        if (disbeliefMixer && director.currentScene === 'scene13') {
+            disbeliefMixer.update(delta);
+        }
+
+        // GERAKAN PLAYER UTAMA
         if (playerModel) {
             if (['scene1', 'scene2', 'scene3', 'scene4'].includes(director.currentScene)) {
                 playerModel.position.x += (charParams.speed * charParams.animSpeed) * delta
@@ -1018,7 +1653,7 @@ function animate() {
             }
         }
 
-        // --- LOGIKA BOLA ---
+        // LOGIKA BOLA
         if (ballModel) {
             if (ballPhysics.isKicked) {
                 const moveDistance = ballPhysics.velocity * delta;
@@ -1069,7 +1704,7 @@ function animate() {
             neighborMixer.update(delta);
         }
 
-        // --- LOGIKA KAMERA PER SCENE ---
+        // LOGIKA KAMERA PER SCENE
         if (director.currentScene === 'scene1' && cineParams.active) {
             camera.position.x += cineParams.speedX * delta
             camera.position.z += cineParams.speedZ * delta
@@ -1157,12 +1792,13 @@ function animate() {
 
             playerModel.position.x += (charParams.speed * charParams.animSpeed * 7.0) * delta;
         }
+        // SCENE 8: ORBIT ROTATE (MULUS DARI POSISI AWAL)
         else if (director.currentScene === 'scene8') {
             const timeInScene = now - scene8StartTime;
 
-            // Juggling Logic (Tetap, tidak diubah)
+            // FASE 0: PERSIAPAN (DIAM)
             if (scene8Phase === 0) {
-                // Kamera diam di posisi awal (tanpa yaw/pitch)
+                camera.position.copy(sceneList.scene8.pos);
                 controls.target.copy(sceneList.scene8.tgt);
 
                 if (timeInScene >= 1.0) {
@@ -1174,14 +1810,40 @@ function animate() {
                     }
                 }
             }
+            // FASE 1: JUGGLING + ORBIT ROTATE
             else if (scene8Phase === 1 && !stallJuggleComplete) {
                 const juggleTime = timeInScene - 1.0;
 
-                // Kamera tetap diam
-                controls.target.copy(sceneList.scene8.tgt);
 
+                // 1. Tentukan Pusat Putaran (Posisi Player)
+                const centerX = -6.5;
+                const centerZ = 0;
+
+                // 2. Ambil Posisi Awal Kamera Scene 8 (Dari data sceneList)
+                const startCamX = sceneList.scene8.pos.x;
+                const startCamZ = sceneList.scene8.pos.z;
+
+                // 3. Hitung Jarak (Radius) & Sudut Awal secara Matematis
+                // Ini memastikan kamera mulai berputar TEPAT dari posisi awalnya
+                const dx = startCamX - centerX;
+                const dz = startCamZ - centerZ;
+                const radius = Math.sqrt(dx * dx + dz * dz); // Jarak otomatis
+                const startAngle = Math.atan2(dz, dx);   // Sudut awal otomatis
+
+                // 4. Update Sudut Berdasarkan Waktu
+                const speed = 1.5; // Kecepatan putar (bisa diubah)
+                const currentAngle = startAngle + (juggleTime * speed);
+
+                // 5. Terapkan Posisi Baru
+                camera.position.x = centerX + Math.cos(currentAngle) * radius;
+                camera.position.z = centerZ + Math.sin(currentAngle) * radius;
+                camera.position.y = sceneList.scene8.pos.y; // Tinggi tetap sama
+
+                // Selalu melihat ke arah pemain
+                controls.target.set(centerX, 1.0, 0);
+
+                // LOGIKA BOLA JUGGLING (TETAP)
                 if (juggleTime < 3.5) {
-                    // Logic Bola Juggling (Tetap)
                     juggleProgress = juggleTime / 3.5;
                     if (ballModel && stallModel) {
                         const maxHeight = 0.6;
@@ -1207,39 +1869,46 @@ function animate() {
                     crouchStartTime = now;
                 }
             }
+            // FASE 2: SWAP MODEL + ZOOM
             else if (scene8Phase === 2) {
-                // Logic Crouch & Zoom (Tetap)
                 if (!playerModel.visible) {
                     if (stallModel) stallModel.visible = false;
                     if (playerModel) {
                         playerModel.visible = true;
                         playerModel.position.copy(stallModel.position);
-                        playerModel.rotation.copy(stallModel.rotation);
+
+                        playerModel.rotation.set(0, THREE.MathUtils.degToRad(150), 0);
+
                         switchPlayerAnimation('crouch');
+
                         if (ballModel) {
                             ballModel.position.x = playerModel.position.x + 0.5;
                             ballModel.position.y = 0.2;
                         }
                     }
                 }
+
                 const timeInPhase2 = now - crouchStartTime;
                 const crouchWaitTime = 1.5;
                 const zoomDuration = 1.0;
 
-                // Zoom Kamera (Tanpa Yaw/Pitch tambahan)
+                // Koordinat Zoom
                 const startCamPos = sceneList.scene8.pos;
                 const startTgt = sceneList.scene8.tgt;
                 const endCamPos = new THREE.Vector3(-6.96, 1.40, -1.25);
                 const endTgt = new THREE.Vector3(-7.13, 1.29, -0.51);
 
                 if (timeInPhase2 < crouchWaitTime) {
+                    // Reset kamera ke posisi awal agar zoom rapi
                     camera.position.copy(startCamPos);
                     controls.target.copy(startTgt);
                 } else {
                     const zoomTime = timeInPhase2 - crouchWaitTime;
                     let progress = zoomTime / zoomDuration;
                     if (progress > 1.0) progress = 1.0;
+
                     const ease = progress * progress * (3 - 2 * progress);
+
                     camera.position.lerpVectors(startCamPos, endCamPos, ease);
                     controls.target.lerpVectors(startTgt, endTgt, ease);
                 }
@@ -1250,7 +1919,7 @@ function animate() {
         else if (director.currentScene === 'scene9') {
             const timeInScene = now - scene9StartTime;
 
-            // --- A. LOGIKA KAMERA (ZOOM SELESAI DI DETIK 5) ---
+            // A. LOGIKA KAMERA (ZOOM SELESAI DI DETIK 5)
             const startPos = sceneList.scene9.pos;
             const startTgt = sceneList.scene9.tgt;
             const endPos = new THREE.Vector3(-3.70, 1.50, 0.65);
@@ -1286,7 +1955,7 @@ function animate() {
             controls.target.y = currentTgt.y;
             controls.target.z = currentTgt.z;
 
-            // --- B. LOGIKA NEIGHBOR (BARU JATUH DI DETIK 5.5) ---
+            // B. LOGIKA NEIGHBOR (BARU JATUH DI DETIK 5.5)
             // Jatuh setelah zoom selesai
             if (timeInScene > 5.5 && !neighborHasFallen) {
                 if (neighborModel) {
@@ -1300,9 +1969,9 @@ function animate() {
             const basePos = sceneList.scene10.pos;
             const baseTgt = sceneList.scene10.tgt;
 
-            // Variabel Yaw & Pitch (Gerakan halus seperti orang melihat)
-            const yaw = Math.sin(now * 1) * 0.5; // Kiri Kanan
-            const pitch = Math.cos(now * 0.8) * 0.2; // Atas Bawah
+            const yaw = Math.sin(now * 1) * 0.5;
+            const pitch = Math.cos(now * 0.8) * 0.2;
+            const rollVal = Math.sin(now * 1) * 0.1;
 
             camera.position.copy(basePos);
 
@@ -1310,32 +1979,12 @@ function animate() {
             controls.target.x = baseTgt.x + yaw;
             controls.target.y = baseTgt.y + pitch;
             controls.target.z = baseTgt.z;
+
+            camera.up.set(rollVal, 1, 0);
+            camera.up.normalize();
         }
 
-        // 
-        else if (director.currentScene === 'scene11') {
-            const timeInScene = now - scene11StartTime;
-            const duration = 5.0;
-            let progress = timeInScene / duration;
-            if (progress > 1) progress = 1;
 
-            // Yaw ke Kiri (Negatif), Pitch ke Atas (Positif)
-            const yaw = -2.0 * progress;  // Bergerak ke kiri sejauh 2 unit
-            const pitch = 1.0 * progress; // Bergerak ke atas sejauh 1 unit
-
-            const baseTgt = sceneList.scene11.tgt;
-
-            camera.position.copy(sceneList.scene11.pos);
-            controls.target.x = baseTgt.x + yaw;
-            controls.target.y = baseTgt.y + pitch;
-            controls.target.z = baseTgt.z;
-
-            // Player Crouch Walk
-            if (playerModel) {
-                const walkSpeed = 0.4;
-                playerModel.translateZ(walkSpeed * delta);
-            }
-        }
 
         else if (director.currentScene === 'scene11') {
             const timeInScene = now - scene11StartTime;
@@ -1376,92 +2025,124 @@ function animate() {
         else if (director.currentScene === 'scene13') {
             const timeInScene = now - scene13StartTime;
 
-            // --- 1. LOGIKA KAMERA (TETAP SAMA) ---
+            // 1. LOGIKA KAMERA
             const startPos = sceneList.scene13.pos;
             const startTgt = sceneList.scene13.tgt;
+
+            // Variabel Animasi Kamera Awal (0 - 7 detik)
             const targetY_Lurus = 1.8;
             const camY_Low = 1.35;
             const moveRightDist = 1.0;
 
             let currCamX = startPos.x;
             let currCamY = startPos.y;
+            let currCamZ = startPos.z; // Kita manipulasi Z untuk Zoom Out
             let currTgtX = startTgt.x;
             let currTgtY = startTgt.y;
+            let currTgtZ = startTgt.z; // Target Z juga ikut mundur
             let swayIntensity = 0;
 
-            if (timeInScene < 3.0) {
-                let t = timeInScene / 3.0;
-                const ease = t * t * t;
-                currCamY = startPos.y + (camY_Low - startPos.y) * ease;
-                currTgtY = startTgt.y + (targetY_Lurus - startTgt.y) * ease;
-                const targetX_Lurus = startPos.x;
-                currTgtX = startTgt.x + (targetX_Lurus - startTgt.x) * ease;
-                currCamX = startPos.x;
-                swayIntensity = 0;
-            }
-            else if (timeInScene < 7.0) {
-                currCamY = camY_Low;
-                currTgtY = targetY_Lurus;
-                let t = (timeInScene - 3.0) / 4.0;
-                const ease = t * t * (3 - 2 * t);
-                const targetCamX = startPos.x + moveRightDist;
-                currCamX = startPos.x + (targetCamX - startPos.x) * ease;
-                currTgtX = currCamX;
-                swayIntensity = 0;
+            if (timeInScene < 8.0) {
+                // FASE AWAL (Sway & Posisi Awal)
+                // (Menggunakan logika lama 0-7 detik Anda, tapi diperpanjang dikit sampai 8s)
+                if (timeInScene < 3.0) {
+                    let t = timeInScene / 3.0;
+                    const ease = t * t * t;
+                    currCamY = startPos.y + (camY_Low - startPos.y) * ease;
+                    currTgtY = startTgt.y + (targetY_Lurus - startTgt.y) * ease;
+                    const targetX_Lurus = startPos.x;
+                    currTgtX = startTgt.x + (targetX_Lurus - startTgt.x) * ease;
+                    currCamX = startPos.x;
+                    swayIntensity = 0;
+                }
+                else {
+                    currCamY = camY_Low;
+                    currTgtY = targetY_Lurus;
+                    let t = (Math.min(timeInScene, 7.0) - 3.0) / 4.0; // Clamp di 7s
+                    const ease = t * t * (3 - 2 * t);
+                    const targetCamX = startPos.x + moveRightDist;
+                    currCamX = startPos.x + (targetCamX - startPos.x) * ease;
+                    currTgtX = currCamX;
+
+                    const swayTime = timeInScene - 7.0;
+                    swayIntensity = (swayTime > 0 && swayTime < 1.0) ? swayTime : (swayTime >= 1.0 ? 1 : 0);
+                }
             }
             else {
+                // FASE ZOOM OUT (RUN ATTACK) > 8.0 Detik
                 currCamY = camY_Low;
                 currTgtY = targetY_Lurus;
                 currCamX = startPos.x + moveRightDist;
                 currTgtX = currCamX;
-                const swayTime = timeInScene - 7.0;
-                swayIntensity = (swayTime < 1.0) ? swayTime : 1;
-            }
-            camera.position.set(currCamX, currCamY, startPos.z);
-            controls.target.set(currTgtX, currTgtY, startTgt.z);
+                swayIntensity = 1;
+                let zoomTime = timeInScene - 8.0;
 
+
+                if (zoomTime > 1) {
+                    zoomTime = 1;
+                }
+
+                const zoomSpeed = 2.0; // Kecepatan mundur
+
+                // Terapkan ke posisi Z (Mundur menjauhi objek)
+                currCamZ = startPos.z + (zoomTime * zoomSpeed);
+                currTgtZ = startTgt.z + (zoomTime * zoomSpeed);
+            }
+
+            // Set Posisi Akhir
+            camera.position.set(currCamX, currCamY, currCamZ);
+            controls.target.set(currTgtX, currTgtY, currTgtZ);
+
+            // Tambahkan Sway
             const yaw = (Math.sin(now * 1.0) * 0.25) * swayIntensity;
             const pitch = (Math.cos(now * 0.8) * 0.15) * swayIntensity;
             controls.target.x += yaw;
             controls.target.y += pitch;
             camera.up.set(0, 1, 0);
 
-            // --- 2. LOGIKA MODEL NEIGHBOR ---
 
-            if (disbeliefMixer && timeInScene < 8) {
-                disbeliefMixer.update(delta);
-            }
+            // 2. LOGIKA NEIGHBOR (Disbelief -> Lari -> Lompat)
 
-            if (timeInScene >= 8 && scene13Phase === 0) {
-                scene13Phase = 0.5; // Phase Freeze
-                neighborModel.userData.freezeTimer = 0; // Init timer freeze
+            // Transisi ke FREEZE / IDLE (Detik 8.0 - 8.5)
+            if (timeInScene >= 8.0 && scene13Phase === 0) {
+                scene13Phase = 0.5;
+                neighborModel.userData.freezeTimer = 0;
 
-                // Matikan Disbelief, Munculkan Neighbor Asli (Posisi Standby/Idle)
                 if (disbeliefModel) disbeliefModel.visible = false;
                 if (neighborModel) {
                     neighborModel.visible = true;
                     neighborModel.position.y = 0;
                     neighborModel.rotation.set(0, Math.PI, 0);
-                    // Kita bisa pakai Idle sebentar atau pose awal run
                     switchNeighborAnimation('idle');
                 }
             }
 
-            // C. Logic Freeze (Tunggu 500ms)
+            if (neighborModel && spotLight1) {
+                const dist = neighborModel.position.distanceTo(spotLight1.position);
+
+                neighborModel.traverse(child => {
+                    if (!child.isMesh || !child.material) return;
+
+                    // Semakin dekat lampu → semakin glossy
+                    const boost = THREE.MathUtils.clamp(3.2 - dist / 6, 2, 3);
+                    child.material.envMapIntensity = boost;
+                    child.material.clearcoatRoughness = 0.04 + dist * 0.005;
+                });
+            }
+
+
+            // Transisi ke LARI (Detik 8.5)
             if (scene13Phase === 0.5) {
                 neighborModel.userData.freezeTimer += delta;
-                if (neighborModel.userData.freezeTimer > 0.5) { // 500ms Freeze
-                    scene13Phase = 1; // Lanjut Lari
+                if (neighborModel.userData.freezeTimer > 0.5) {
+                    scene13Phase = 1;
                     switchNeighborAnimation('run_attack');
                 }
             }
 
-            // D. Gerakan Lari & Lompat
+            // Gerakan Lari & Lompat
             if (scene13Phase >= 1 && neighborModel) {
-
-                // --- FASE LARI ---
                 if (scene13Phase === 1) {
-                    // LARI LEBIH PELAN LAGI (Speed 1.2)
                     const runSpeed = 1.2;
                     neighborModel.position.z += runSpeed * delta;
 
@@ -1472,30 +2153,24 @@ function animate() {
                         neighborModel.userData.jumpTimer = 0;
                     }
                 }
-
-                // --- FASE LOMPAT ---
                 if (scene13Phase >= 2) {
-                    // Maju sedikit saat melompat
                     neighborModel.position.z += 0.8 * delta;
-
                     neighborModel.userData.jumpTimer += delta;
 
-                    // Switch ke Jump Loop
                     if (neighborModel.userData.jumpTimer > 0.3 && scene13Phase === 2) {
                         scene13Phase = 3;
                         switchNeighborAnimation('jump_loop');
                     }
-
-                    // LOMPAT NAIK (LEBIH RENDAH KECEPATANNYA)
-                    // Angka 1.8 ini menentukan seberapa cepat dia naik ke atas
-                    neighborModel.position.y += 1.8 * delta;
+                    neighborModel.position.y += 1.3 * delta; // Lompat naik
                 }
             }
         }
     }
 
-    if (camera.position.y < 0.2) camera.position.y = 0.2
-    controls.update()
+    if (camera.position.y < 0.2) camera.position.y = 0.2;
+    if (!isManualMode) {
+        controls.update();
+    }
     renderer.render(scene, camera)
 }
 
