@@ -81,7 +81,7 @@ scene.add(ambientLight);
 
 // 4. DIRECTIONAL LIGHT
 const dirLight = new THREE.DirectionalLight(0xffaa33, 6) // Warna Emas/Oranye
-dirLight.position.set(-60, 20, 80);
+dirLight.position.set(-60, 50, 80);
 dirLight.castShadow = true
 
 // Setup kualitas bayangan
